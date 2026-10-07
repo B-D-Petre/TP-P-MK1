@@ -6,17 +6,20 @@ The architecture and rationale are in [`Trustpilot_GraphRAG_Design_Document.pdf`
 
 ## Quick start
 
-Requirements: [uv](https://docs.astral.sh/uv/) and an Anthropic API key from [console.anthropic.com](https://console.anthropic.com). The API is billed separately from Claude Pro/Max subscriptions.
+Requirements: [uv](https://docs.astral.sh/uv/) and an API key for one LLM provider (see [LLM provider](#llm-provider-claude-or-deepseek)):
+- **DeepSeek** (the current default, cheapest): a key from [platform.deepseek.com](https://platform.deepseek.com).
+- **Anthropic Claude:** a key from [console.anthropic.com](https://console.anthropic.com). The API is billed separately from Claude Pro/Max subscriptions.
 
 ```bash
 uv sync                                               # install Python and dependencies
 # put your key in .env (see Configuration)
-uv run poc-trustpilot run --sample 3                  # smoke test, about $0.01
-uv run poc-trustpilot run                             # full run (SAMPLE_SIZE reviews)
+uv run poc-trustpilot run --sample 3                  # smoke test, well under $0.01
+uv run poc-trustpilot run                             # SAMPLE_SIZE reviews (1,000)
+uv run poc-trustpilot run --sample 10000              # the whole dataset
 uv run streamlit run src/poc_trustpilot/ui/app.py     # UI at http://localhost:8501
 ```
 
-Run everything from the repo root.
+Run everything from the repo root. Each run overwrites `data/gold/` with its own result.
 
 ## What the pipeline does
 
@@ -36,11 +39,13 @@ The run ends by printing the token usage and estimated cost.
 ### Text handling (from `notebooks/02`)
 - **Cleaning:** HTML entities are decoded, typography and whitespace are normalised, and the ~88 spellings of the brand (`trust pilot`, `Truspilot`, `TP`…) are mapped to `Trustpilot`.
 - **Title vs body:** each review is sent as **one text**. The title is kept only if it adds words the body doesn't already have, which happens for about 22% of reviews. Most titles just repeat or auto-truncate the body.
-- **Too-short reviews are not sampled:** reviews with fewer than 8 words, or emoji-only ones, are excluded.
+- **Too-short reviews are not sampled:** reviews with fewer than 8 words, or emoji-only ones, are excluded from samples. A full run (`--sample 10000`) includes them.
 - **Language-sensitive steps (accents, stemming, stopwords) are not applied in code.** The LLM reads each review in its own language and returns English names for the concepts.
 
 ### Sampling
-`sample.py` draws a deterministic sample (`SEED`). It **matches the dataset's star distribution** (≈16% 1★ / 3% 2★ / 4% 3★ / 7% 4★ / 70% 5★) and spreads reviews across language × source (invited/organic) within each star level.
+`sample.py` draws a deterministic sample (`SEED`). It **matches the dataset's star distribution** (≈16% 1★ / 3% 2★ / 4% 3★ / 7% 4★ / 70% 5★) and spreads reviews across language × source (invited/organic) within each star level. Only informative reviews (8+ words, not low-content) are sampled, which caps a sample at 6,790.
+
+**Full run:** `--sample` set to the dataset size or more (`--sample 10000`) skips sampling and processes **every review with at least one word: 9,983 reviews**, short ones included.
 
 ## Outputs: the golden layer
 
@@ -76,17 +81,42 @@ To point the UI at a different golden layer, set `POC_GOLD_DIR=/path/to/gold`.
 
 ### `.env` (repo root, git-ignored)
 ```
-ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_API_KEY=sk-ant-...   # used when PROVIDER = "anthropic"
+DEEPSEEK_API_KEY=sk-...        # used when PROVIDER = "deepseek"
 ```
-The key is loaded only inside the pipeline process. **Don't export it system-wide:** Claude Code would pick it up and bill your API account instead of your subscription.
+You only need the key for the provider you use. Keys are loaded only inside the pipeline process. **Don't export `ANTHROPIC_API_KEY` system-wide:** Claude Code would pick it up and bill your API account instead of your subscription.
+
+### LLM provider: Claude or DeepSeek
+Set `PROVIDER` in `config.py`. Both providers use the same prompts, the same Pydantic schema and the same caches, so everything downstream of extraction is identical.
+
+| | `"anthropic"` | `"deepseek"` (current default) |
+|---|---|---|
+| Model | `claude-sonnet-5-5`, low effort, thinking off | `deepseek-flash` |
+| API | Anthropic SDK, `messages.parse` | OpenAI-compatible API (`openai` SDK, `base_url=https://api.deepseek.com`) |
+| Schema enforcement | **structured outputs**: the reply is constrained to the Pydantic schema | **JSON mode**: guarantees valid JSON only. The schema is added to the prompt, every reply is validated with Pydantic, and a failure gets **one retry** |
+| Prompt caching | explicit `cache_control` on the system prompt | automatic (identical prompt prefix is billed at the cache-hit rate) |
+| Refusal handling | server-side fallback to another model | none needed |
+| Parallel calls (`MAX_WORKERS`) | 8 | 16 |
+| Price per million tokens (in / out) | $2.00 / $10.00 | $0.15 / $0.60 off-peak, **double at peak (01:00–04:00 and 06:00–10:00 UTC)** |
+| Data location | Anthropic | DeepSeek servers in China (fine for public reviews, but check company policy before production use) |
+
+**Switching provider re-extracts everything.** The extraction cache key includes the model name, so DeepSeek and Claude results live side by side in `extractions.jsonl`. Switching back reuses the other provider's cached results without paying again.
+
+**Expected DeepSeek log lines** (reviews are skipped, never saved half-finished, and retried on the next run):
+- `hit max_tokens before finishing the JSON`: JSON mode occasionally loops on repeated text. This is random, and the retry usually fixes it.
+- `reply did not match the schema`: valid JSON, but a wrong field, e.g. a category outside the enum.
+
+At ~1% of reviews this is normal. Re-run the same command afterwards to fill the gaps.
 
 ### [`src/poc_trustpilot/Pipeline/config.py`](src/poc_trustpilot/Pipeline/config.py)
 
 | Setting | Default | What it controls |
 |---|---|---|
 | `SAMPLE_SIZE`, `SEED` | 1000, 42 | reviews sent to the LLM (`--sample` overrides the size) |
-| `MODEL`, `EFFORT` | `claude-sonnet-5-5`, `low` | extraction and summary model; thinking is off |
-| `MAX_WORKERS` | 8 | parallel API calls |
+| `PROVIDER` | `deepseek` | `"deepseek"` or `"anthropic"`; sets `MODEL`, `MAX_WORKERS` and `PRICE_*` |
+| `MODEL`, `EFFORT` | `deepseek-flash` / `claude-sonnet-5-5`, `low` | extraction and summary model (`EFFORT` is Claude-only) |
+| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | DeepSeek's OpenAI-compatible endpoint |
+| `MAX_WORKERS` | 16 / 8 | parallel API calls |
 | `PROMPT_VERSION` | `v2` | part of the cache key; **bump it after changing a prompt or schema**, otherwise cached results are reused |
 | `MAX_REVIEW_CHARS` | 1500 | input cap per review (~400 tokens) |
 | `MAX_ASPECTS`, `MAX_TRIPLETS`, `EVIDENCE_MAX_WORDS` | 4, 3, 12 | output budget per review |
@@ -94,20 +124,22 @@ The key is loaded only inside the pipeline process. **Don't export it system-wid
 | `LEIDEN_MACRO_RESOLUTION` / `_MICRO_` | 0.6 / 1.5 | higher = more, smaller communities |
 | `MIN_INTEREST_ENTITIES` | 3 | smaller communities stay on the graph but get no LLM summary |
 | `HUB_ENTITIES` | trustpilot, reviewer, business | kept on the graph, excluded from clustering |
-| `PRICE_*` | Sonnet 5.5 rates | used only for the cost printout |
+| `PRICE_*` | per provider (DeepSeek: off-peak) | used only for the cost printout; DeepSeek peak hours really cost double |
 
 The schema enums (aspect categories, predicates, sentiment) are in [`schema.py`](src/poc_trustpilot/Pipeline/schema.py). The prompts are in `extract.py` and `summarize.py`.
 
 ## Cost
 
-| Run | Estimate |
-|---|---|
-| 3 reviews (smoke test) | ~$0.01 |
-| 50 reviews | ~$0.21 |
-| 1,000 reviews | ~$3–3.50 (ceiling ~$11), ~8–10 min |
-| 10,000 reviews | ~$35–40 with normal API calls; the Batches API (not implemented) would halve it |
+| Run | Claude Sonnet 5.5 | DeepSeek Flash (off-peak / peak) |
+|---|---|---|
+| 3 reviews (smoke test) | ~$0.01 | < $0.01 |
+| 50 reviews | ~$0.21 | ~$0.01 |
+| 1,000 reviews | ~$3–3.50 (ceiling ~$11), ~8–10 min | ~$0.17 / ~$0.35 |
+| 9,983 reviews (`--sample 10000`) | ~$35–40 | **~$1.70 / ~$3.30**, ~1 h |
 
-About two-thirds of the cost is output tokens, so the prompt-level output caps matter most. The system prompt is prompt-cached. **Re-runs are almost free:** extractions are cached per review (`review_id` + `PROMPT_VERSION` + `MODEL`), and summaries are cached on their input. Failed calls are logged and skipped, and re-running the same command fills in only the missing ones.
+These are estimates; each run prints its real token usage and cost. For DeepSeek the printout uses off-peak rates, so double it for runs during peak hours. **Run large DeepSeek jobs outside 01:00–04:00 and 06:00–10:00 UTC.**
+
+About two-thirds of the cost is output tokens, so the prompt-level output caps matter most. The system prompt is cached by both providers. **Re-runs are almost free:** extractions are cached per review (`review_id` + `PROMPT_VERSION` + `MODEL`), and summaries are cached on their input. Failed calls are logged and skipped, and re-running the same command fills in only the missing ones.
 
 To start fresh, delete `data/silver/extractions.jsonl` and `summaries.jsonl`, or bump `PROMPT_VERSION`.
 
@@ -137,5 +169,6 @@ These cover cleaning, brand canonicalization, title merging, truncation, entity 
 - **Sample bias:** at the natural star mix, 70% of reviews are 5★, so the larger interests tend to be positive. The organic channel (≈51% 1★) holds most of the complaints; filter on it in the UI.
 - **LLM variability:** extraction is constrained by enums and caps, but entity names still vary. The fuzzy merge (`token_sort_ratio ≥ 90`) catches spelling variants, not synonyms.
 - **Leiden is deterministic for a fixed seed and graph**, but the clusters change when the sample or the prompt changes.
-- **Refusal fallback:** if Claude declines a request, the API automatically retries it on another model (`fallbacks="default"`). This is negligible for review text. Remove it in `llm.py` to opt out.
-- **Data:** the reviews are public, but they are sent to the Anthropic API. The prompts tell the model not to output personal data.
+- **Refusal fallback (Claude only):** if Claude declines a request, the API automatically retries it on another model (`fallbacks="default"`). This is negligible for review text. Remove it in `llm.py` to opt out.
+- **Schema enforcement differs by provider:** Claude's structured outputs constrain the reply to the schema; DeepSeek's JSON mode only guarantees valid JSON, so a small share of replies fail Pydantic validation and are retried or skipped. Extraction quality also differs between models, so compare interests across providers with care.
+- **Data:** the reviews are public, but they are sent to the selected provider's API (Anthropic, or DeepSeek in China). The prompts tell the model not to output personal data.
