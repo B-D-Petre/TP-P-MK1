@@ -1,67 +1,141 @@
-# Trustpilot Agentic GraphRAG Design Document.pdf
+# Trustpilot Interest Extraction: Agentic GraphRAG POC
 
-**DOC TYPE:** DESIGN DOCUMENT & POC[cite: 1]
-**DATE:** OCTOBER 4, 2026[cite: 1]
+Extracts user interests from Trustpilot reviews of Trustpilot (2021 sample). An LLM pulls aspects and relations out of each review, they are merged into a knowledge graph, Leiden community detection groups them into **interests**, and a Streamlit app lets you explore the result.
 
-## 1. Executive Summary
-This document outlines a Proof of Concept (POC) for extracting actionable user interests from unstructured Trustpilot reviews[cite: 1]. By moving beyond rigid keyword extraction and adopting an Agentic GraphRAG architecture, the system will autonomously extract relational data, group it into thematic communities, and allow Al agents to navigate the resulting knowledge graph to answer complex business queries[cite: 1].
+The architecture and rationale are in [`Trustpilot_GraphRAG_Design_Document.pdf`](Trustpilot_GraphRAG_Design_Document.pdf), with interactive diagrams in [`Flow and architecture/`](Flow%20and%20architecture/). This README covers how to run the project.
 
-## 2. Data Schema & Ingestion
-The system will ingest the provided 2021 review dataset utilizing the following schema structure to establish the foundational nodes and edges of the graph[cite: 1]:
-* **Review_id:** Unique identifier (serves as the Primary Key for source nodes)[cite: 1].
-* **Created_date:** Used for temporal edge weighting and time-series filtering[cite: 1].
-* **Star rating:** Provides sentiment validation across defined communities[cite: 1].
-* **Review title & Review text:** The primary unstructured text used for entity extraction[cite: 1].
-* **Review source:** Metadata for segmenting organic vs. invited reviews[cite: 1].
-* **Language:** Enables multilingual routing and localization clustering[cite: 1].
+## Quick start
 
-## 3. Pipeline Architecture
+Requirements: [uv](https://docs.astral.sh/uv/) and an Anthropic API key from [console.anthropic.com](https://console.anthropic.com). The API is billed separately from Claude Pro/Max subscriptions.
 
-### Phase 1: Entity & Triplet Extraction (Updated Layer 1)
-Instead of matching flat keywords, a Large Language Model (LLM) will process the review text to extract Aspect-Opinion-Sentiment triplets[cite: 1]. This allows the system to capture the precise context of a user's statement[cite: 1]. To optimize for short-form consumer reviews, this layer now utilizes:
-* **Contextual String Assembly:** Metadata is prepended to the review body to anchor the LLM's understanding without requiring arbitrary text splitting.
-* **Single-Pass Joint Extraction:** The LLM extracts both the macro-topics (Aspects) and the micro-relationships (Triplets) simultaneously in one forward pass.
-* **Runtime Schema Enforcement:** The LLM's output is strictly constrained using a Pydantic schema, locking predicates to predefined Enums to prevent graph fracturing.
-* **Post-Extraction Canonicalization:** Extracted subjects and objects are normalized and fuzzy-matched to merge spelling variants into unified canonical nodes.
+```bash
+uv sync                                               # install Python and dependencies
+# put your key in .env (see Configuration)
+uv run poc-trustpilot run --sample 3                  # smoke test, about $0.01
+uv run poc-trustpilot run                             # full run (SAMPLE_SIZE reviews)
+uv run streamlit run src/poc_trustpilot/ui/app.py     # UI at http://localhost:8501
+```
 
-### Phase 2: Community Detection & Interest Definition
-The extracted triplets form a massive Knowledge Graph[cite: 1]. We define macro and micro "Interests" not by single keywords, but by semantic clusters of related concepts[cite: 1].
-* **Clustering Algorithm:** Leiden or Louvain community detection groups highly interconnected nodes into distinct clusters (e.g., grouping "Cart," "Credit Card," and "Apple Pay")[cite: 1].
-* **Interest Summarization:** An LLM reads the entities within a cluster and generates a human-readable summary[cite: 1].
+Run everything from the repo root.
 
-### Phase 3: Downstream Applications (Decomposed Layer 3)
-Because the GraphRAG architecture fundamentally decouples the semantic data layer from the application layer, the enriched Knowledge Base serves as a centralized hub for three parallel downstream operational tracks. This transforms the system from a standalone conversational interface into a comprehensive semantic data warehouse.
+## What the pipeline does
 
-#### Track 1: Agentic Flows (Conversational AI)
-Users query the system in natural language, and a routing LLM acts as the orchestrator to determine the optimal graph execution path based on the user's intent[cite: 2]:
-*   **Global Search (Map-Reduce):** Deployed for thematic, open-ended questions (e.g., *"What are the top 3 complaints from 1-star reviews?"*)[cite: 2]. The system aggregates and synthesizes the pre-computed Community Summaries[cite: 2].
-*   **Local Search (Parameterized Cypher):** Deployed for specific root-cause drill-downs (e.g., *"Why is Apple Pay failing?"*)[cite: 2]. To prevent Text-to-Cypher hallucinations, the agent performs Named Entity Recognition (NER) and injects the extracted parameters into hardcoded, pre-validated Cypher templates rather than writing queries from scratch.
+`uv run poc-trustpilot run [--sample N]` runs six steps in [`src/poc_trustpilot/Pipeline/run.py`](src/poc_trustpilot/Pipeline/run.py):
 
-#### Track 2: BI & Analytics (Visual Graph Exploration)
-Human analysts and product managers can bypass the LLM reasoning loop entirely to explore the data structurally. 
-*   **Direct Visualization:** Using enterprise tools like Neo4j Bloom or Linkurious, teams can visually query the graph database, filter nodes by metadata (e.g., 1-star ratings, specific temporal bounds), and manually expand relationships to uncover how a specific software bug connects to negative sentiment across different user demographics.
+| Step | Module | Output |
+|---|---|---|
+| 1. Bronze: load the raw CSV, type the dates, merge `nb` into `no` | `bronze.py` | `data/bronze/reviews.parquet` |
+| 2. Silver: clean the text, choose the title/body text, draw a stratified sample | `clean.py`, `sample.py` | `data/silver/reviews_clean.parquet`, `sample.parquet` |
+| 3. Layer 1: LLM joint extraction of aspects and triplets, constrained by a Pydantic schema | `extract.py`, `schema.py`, `llm.py` | `data/silver/extractions.jsonl` (cache) |
+| 4. Canonicalization: normalise names, fuzzy-merge variants into canonical entities | `canonicalize.py` | in memory |
+| 5. Layer 2: build the knowledge graph, run Leiden (macro, then micro inside each macro) | `graph.py` | in memory |
+| 6. Interests and golden layer: one LLM summary per community, write the gold tables | `summarize.py`, `gold.py` | `data/gold/*`, `data/silver/summaries.jsonl` (cache) |
 
-#### Track 3: ML & Graph Neural Networks (Predictive Intelligence)
-Instead of solely analyzing historical data, this track leverages the graph's mathematical topology to forecast future user behavior and systemic risks.
-*   **Node Classification:** Graph Neural Networks (e.g., GraphSAGE) assess node degree, connectivity, and structural proximity to known "complaint" clusters. This allows the system to flag a seemingly neutral review as a high churn risk based purely on its structural placement within the network.
-*   **Link Prediction:** The network forecasts emerging issues by predicting edge formations between currently unconnected nodes (e.g., predicting that a recent UI update node will shortly connect to a surge in customer support ticket nodes before the correlation is explicitly stated in reviews).
+The run ends by printing the token usage and estimated cost.
 
-## 4. Example Agentic Workflow
-An autonomous agent, utilizing a ReAct (Reason + Act) framework, will handle complex investigative tasks without human intervention[cite: 2]. The table below illustrates a standard trace execution[cite: 2]:
+### Text handling (from `notebooks/02`)
+- **Cleaning:** HTML entities are decoded, typography and whitespace are normalised, and the ~88 spellings of the brand (`trust pilot`, `Truspilot`, `TP`…) are mapped to `Trustpilot`.
+- **Title vs body:** each review is sent as **one text**. The title is kept only if it adds words the body doesn't already have, which happens for about 22% of reviews. Most titles just repeat or auto-truncate the body.
+- **Too-short reviews are not sampled:** reviews with fewer than 8 words, or emoji-only ones, are excluded.
+- **Language-sensitive steps (accents, stemming, stopwords) are not applied in code.** The LLM reads each review in its own language and returns English names for the concepts.
 
-| Phase | Action / Input | System Process & Observation |
-| :--- | :--- | :--- |
-| **1. Prompt** | User requests: "Identify the most damaging emerging interest from 2021."[cite: 2] | The Agent initializes the reasoning loop and analyzes available graph tools[cite: 2]. |
-| **2. Global Query** | Agent calls Query_Global_Communities filtered by 1 and 2-star ratings[cite: 2]. | The Graph returns Cluster 12[cite: 2]. The summarized interest is identified as: "Unexpected auto-renewal charges."[cite: 2] |
-| **3. Drill-down** | Agent calls Query_Local_Entity on the "auto-renewal" node to find root causes[cite: 2]. | The Graph retrieves connected edges: (auto-renewal) <- [CAUSED_BY] (hidden toggle switch)[cite: 2]. |
-| **4. Synthesis** | Agent drafts the final explanatory response[cite: 2]. | Combines the macro-trend (auto-renewal complaints) with the specific Ul root cause (hidden toggles) and delivers the final text to the user[cite: 2]. |
+### Sampling
+`sample.py` draws a deterministic sample (`SEED`). It **matches the dataset's star distribution** (≈16% 1★ / 3% 2★ / 4% 3★ / 7% 4★ / 70% 5★) and spreads reviews across language × source (invited/organic) within each star level.
 
-**Next Steps for Implementation:** Configure the LLM prompts for reliable triplet extraction, establish the vector database/graph store (e.g., Neo4j), and define the LangChain toolsets for the routing agent[cite: 2].
+## Outputs: the golden layer
 
-## 5. POC to Production Steps
-The migration from an experimental local POC to an enterprise production deployment follows these structured steps:
+Everything is written to `data/` (git-ignored) and regenerated by the pipeline.
 
-* **Step 1: Schema Bootstrapping:** Run unconstrained extraction across a small review sample to observe organic terminology, then freeze the Pydantic Enum schema with strict validation rules.
-* **Step 2: Component Alignment:** Migrate from local embedded tools (Kùzu, ChromaDB, `cdlib`) to horizontally scalable cloud microservices (Neo4j Enterprise, Pinecone, Neo4j Graph Data Science).
-* **Step 3: Constraint Hardening:** Prevent Text-to-Cypher hallucinations by restricting the agent to Named Entity Recognition and injecting parameters into pre-validated, hardcoded query templates. Implement asynchronous message queues for batch ingestion.
-* **Step 4: Continuous Evaluation:** Schedule periodic offline Leiden re-clustering runs to detect emerging shifts in user interests over time.
+| File | Grain | Notes |
+|---|---|---|
+| `data/gold/gold_reviews.parquet` | review | metadata, cleaned text, overall sentiment, primary interest, `title_kept`, `extraction_ok` |
+| `data/gold/gold_aspect_mentions.parquet` | review × aspect | entity, category, opinion, sentiment, verbatim evidence |
+| `data/gold/gold_entities.parquet` | entity (**graph nodes**) | name, aliases, category, mentions, avg ★, % negative, macro/micro cluster, degree, PageRank |
+| `data/gold/gold_entity_lineage.parquet` | raw surface form → entity | how each LLM name became a node: normalized form, canonical, `exact`/`fuzzy` merge + score, mentions, roles |
+| `data/gold/gold_relations.parquet` | entity → entity (**graph edges**) | predicate (HAS_ISSUE, CAUSED_BY, …), weight, sentiment mix, source review ids |
+| `data/gold/gold_interests.parquet` | interest (macro + micro) | title, summary, sentiment, size, avg ★, top entities, quotes, language/source mix |
+| `data/gold/gold_review_interests.parquet` | review × interest | weight = share of the review's entities in that interest |
+| `data/gold/graph.json` | full graph | nodes + relation and co-mention edges, read by the UI |
+
+**Where the knowledge graph lives:** there is no graph database in the POC. Nodes are in `gold_entities`, edges are in `gold_relations` and `graph.json`, and NetworkX/igraph rebuild the graph in memory. Both tables are already in the node/edge shape that Neo4j or Kùzu bulk imports expect.
+
+## The UI
+
+`uv run streamlit run src/poc_trustpilot/ui/app.py`
+
+- **Interests:** interests ranked by number of reviews, split by sentiment. Each interest has a card with its summary, rating, top entities and a quote, plus its micro interests.
+- **Knowledge graph:** nodes are colored by Leiden cluster (macro or micro). The top 8 clusters get distinct colors and the rest are grey. Node size = mentions. Dark edges are extracted relations; light edges are co-mentions within a review. Hover a node for details.
+- **Canonicalization:** for each entity, a flowchart from the raw LLM forms to their normalized names to the canonical node. Edges show which normalization steps changed each form, and fuzzy merges are dashed with their similarity score. Also: a step-by-step trace for each surface form, and a list of all fuzzy merges, lowest score first.
+- **Reviews:** a filterable table, with a drill-down into the aspects extracted from each review.
+- **Pipeline:** a flowchart of the whole pipeline, plus a detailed flowchart for each stage. The numbers in the charts (caps, thresholds, resolutions) come from `config.py`, and live counts come from the loaded golden layer.
+- **Sidebar filters:** stars, source, language, highlighted interest, minimum mentions, and whether to show the hub entities (`Trustpilot`, `reviewer`, `business`) and unclustered ones.
+
+To point the UI at a different golden layer, set `POC_GOLD_DIR=/path/to/gold`.
+
+## Configuration
+
+### `.env` (repo root, git-ignored)
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
+The key is loaded only inside the pipeline process. **Don't export it system-wide:** Claude Code would pick it up and bill your API account instead of your subscription.
+
+### [`src/poc_trustpilot/Pipeline/config.py`](src/poc_trustpilot/Pipeline/config.py)
+
+| Setting | Default | What it controls |
+|---|---|---|
+| `SAMPLE_SIZE`, `SEED` | 1000, 42 | reviews sent to the LLM (`--sample` overrides the size) |
+| `MODEL`, `EFFORT` | `claude-sonnet-5-5`, `low` | extraction and summary model; thinking is off |
+| `MAX_WORKERS` | 8 | parallel API calls |
+| `PROMPT_VERSION` | `v2` | part of the cache key; **bump it after changing a prompt or schema**, otherwise cached results are reused |
+| `MAX_REVIEW_CHARS` | 1500 | input cap per review (~400 tokens) |
+| `MAX_ASPECTS`, `MAX_TRIPLETS`, `EVIDENCE_MAX_WORDS` | 4, 3, 12 | output budget per review |
+| `MAX_OUTPUT_TOKENS_EXTRACTION` / `_SUMMARY` | 1024 / 512 | hard `max_tokens` ceilings (guards against runaway responses) |
+| `LEIDEN_MACRO_RESOLUTION` / `_MICRO_` | 0.6 / 1.5 | higher = more, smaller communities |
+| `MIN_INTEREST_ENTITIES` | 3 | smaller communities stay on the graph but get no LLM summary |
+| `HUB_ENTITIES` | trustpilot, reviewer, business | kept on the graph, excluded from clustering |
+| `PRICE_*` | Sonnet 5.5 rates | used only for the cost printout |
+
+The schema enums (aspect categories, predicates, sentiment) are in [`schema.py`](src/poc_trustpilot/Pipeline/schema.py). The prompts are in `extract.py` and `summarize.py`.
+
+## Cost
+
+| Run | Estimate |
+|---|---|
+| 3 reviews (smoke test) | ~$0.01 |
+| 50 reviews | ~$0.21 |
+| 1,000 reviews | ~$3–3.50 (ceiling ~$11), ~8–10 min |
+| 10,000 reviews | ~$35–40 with normal API calls; the Batches API (not implemented) would halve it |
+
+About two-thirds of the cost is output tokens, so the prompt-level output caps matter most. The system prompt is prompt-cached. **Re-runs are almost free:** extractions are cached per review (`review_id` + `PROMPT_VERSION` + `MODEL`), and summaries are cached on their input. Failed calls are logged and skipped, and re-running the same command fills in only the missing ones.
+
+To start fresh, delete `data/silver/extractions.jsonl` and `summaries.jsonl`, or bump `PROMPT_VERSION`.
+
+## Repo layout
+
+```
+Data_Advisory_Random_Sample_tp_2021 (3) (1).csv   raw input (10,000 reviews)
+notebooks/01_data_exploration.ipynb               EDA: ratings, sources, languages, time, themes
+notebooks/02_text_consistency_exploration.ipynb   text issues that would fragment graph nodes
+src/poc_trustpilot/Pipeline/                      pipeline (see table above)
+src/poc_trustpilot/ui/app.py                      Streamlit UI (Track 2: visual exploration)
+tests/                                            unit tests, no API key needed
+Flow and architecture/                            architecture diagrams (HTML)
+Trustpilot_GraphRAG_Design_Document.pdf           design document
+```
+
+## Tests
+
+```bash
+uv run pytest
+```
+These cover cleaning, brand canonicalization, title merging, truncation, entity canonicalization, Leiden clustering, the gold tables (with the LLM stubbed out) and the sampler's star distribution.
+
+## Considerations and limitations
+
+- **Scope:** Layers 1–2 plus Layer 3 Track 2 (visual exploration). Track 1 (agentic Q&A with global/local search) and Track 3 (GNNs) are not implemented.
+- **Sample bias:** at the natural star mix, 70% of reviews are 5★, so the larger interests tend to be positive. The organic channel (≈51% 1★) holds most of the complaints; filter on it in the UI.
+- **LLM variability:** extraction is constrained by enums and caps, but entity names still vary. The fuzzy merge (`token_sort_ratio ≥ 90`) catches spelling variants, not synonyms.
+- **Leiden is deterministic for a fixed seed and graph**, but the clusters change when the sample or the prompt changes.
+- **Refusal fallback:** if Claude declines a request, the API automatically retries it on another model (`fallbacks="default"`). This is negligible for review text. Remove it in `llm.py` to opt out.
+- **Data:** the reviews are public, but they are sent to the Anthropic API. The prompts tell the model not to output personal data.

@@ -1,14 +1,17 @@
-"""Thin wrapper around the Claude API: structured-output calls, a JSONL cache and cost accounting."""
+"""Thin wrapper around the LLM API (Claude or DeepSeek): schema-validated calls, a JSONL cache and cost accounting."""
 import json
+import os
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import anthropic
+import openai
 from dotenv import load_dotenv
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
-from .config import (EFFORT, MODEL, PRICE_CACHE_READ, PRICE_CACHE_WRITE, PRICE_INPUT, PRICE_OUTPUT, ROOT)
+from .config import (DEEPSEEK_BASE_URL, EFFORT, MODEL, PRICE_CACHE_READ, PRICE_CACHE_WRITE, PRICE_INPUT, PRICE_OUTPUT,
+                     PROVIDER, ROOT)
 
 
 class LLMError(RuntimeError):
@@ -24,13 +27,13 @@ class UsageMeter:
     cache_read_tokens: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def add(self, usage) -> None:
+    def add(self, input_tokens: int, output_tokens: int, cache_write: int = 0, cache_read: int = 0) -> None:
         with self._lock:
             self.calls += 1
-            self.input_tokens += usage.input_tokens or 0
-            self.output_tokens += usage.output_tokens or 0
-            self.cache_write_tokens += usage.cache_creation_input_tokens or 0
-            self.cache_read_tokens += usage.cache_read_input_tokens or 0
+            self.input_tokens += input_tokens or 0
+            self.output_tokens += output_tokens or 0
+            self.cache_write_tokens += cache_write or 0
+            self.cache_read_tokens += cache_read or 0
 
     @property
     def cost_usd(self) -> float:
@@ -43,18 +46,54 @@ class UsageMeter:
 
 
 METER = UsageMeter()
-_client: anthropic.Anthropic | None = None
+_client = None
 
 
-def client() -> anthropic.Anthropic:
+def client():
     global _client
     if _client is None:
         load_dotenv(ROOT / ".env")
-        _client = anthropic.Anthropic()
+        if PROVIDER == "deepseek":
+            _client = openai.OpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY"), base_url=DEEPSEEK_BASE_URL,
+                                    max_retries=6)
+        else:
+            _client = anthropic.Anthropic(max_retries=6)  # parallel calls can hit 429s; SDK backs off
     return _client
 
 
 def parse(system: str, user: str, output_model: type[BaseModel], max_tokens: int = 4000) -> BaseModel:
+    return (_parse_deepseek if PROVIDER == "deepseek" else _parse_anthropic)(system, user, output_model, max_tokens)
+
+
+def _parse_deepseek(system: str, user: str, output_model: type[BaseModel], max_tokens: int) -> BaseModel:
+    """DeepSeek JSON mode guarantees valid JSON, not the schema, so the schema goes in the prompt and the reply is
+    validated with Pydantic; one retry on a bad reply. The prompt prefix is identical every call, so DeepSeek's
+    automatic context cache serves it at the cache-hit price."""
+    system = (f"{system}\n\nRespond with one JSON object that validates against this JSON schema "
+              f"(no prose, no markdown):\n{json.dumps(output_model.model_json_schema())}")
+    last = None
+    for _ in range(2):
+        try:
+            resp = client().chat.completions.create(
+                model=MODEL, max_tokens=max_tokens, response_format={"type": "json_object"},
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
+        except openai.AuthenticationError as e:
+            raise LLMError("Authentication failed - set DEEPSEEK_API_KEY in .env") from e
+        u = resp.usage
+        hit = getattr(u, "prompt_cache_hit_tokens", 0) or 0
+        METER.add(u.prompt_tokens - hit, u.completion_tokens, cache_read=hit)
+        choice = resp.choices[0]
+        if choice.finish_reason == "length":  # JSON mode sometimes loops (repeated text) - usually fine on retry
+            last = "hit max_tokens before finishing the JSON"
+            continue
+        try:
+            return output_model.model_validate_json(choice.message.content or "")
+        except ValidationError as e:
+            last = f"reply did not match the schema: {str(e).splitlines()[0]}"
+    raise LLMError(last)
+
+
+def _parse_anthropic(system: str, user: str, output_model: type[BaseModel], max_tokens: int) -> BaseModel:
     """One structured-output call. The system prompt is cached; a policy refusal falls back server-side."""
     try:
         resp = client().beta.messages.parse(
@@ -70,7 +109,8 @@ def parse(system: str, user: str, output_model: type[BaseModel], max_tokens: int
         )
     except anthropic.AuthenticationError as e:
         raise LLMError("Authentication failed - set ANTHROPIC_API_KEY in your environment or in .env") from e
-    METER.add(resp.usage)
+    u = resp.usage
+    METER.add(u.input_tokens, u.output_tokens, u.cache_creation_input_tokens, u.cache_read_input_tokens)
     if resp.stop_reason == "refusal":
         raise LLMError(f"refused ({getattr(resp.stop_details, 'category', None)})")
     if resp.stop_reason == "max_tokens":

@@ -12,10 +12,12 @@ import altair as alt
 import networkx as nx
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 from pyvis.network import Network
 
+from poc_trustpilot.Pipeline.canonicalize import normalize_trace
 from poc_trustpilot.Pipeline.config import GOLD as DEFAULT_GOLD
+from poc_trustpilot.Pipeline.config import HUB_ENTITIES
+from poc_trustpilot.ui.flows import LEGEND, OVERVIEW, STAGES, lineage_dot
 
 GOLD = Path(os.environ.get("POC_GOLD_DIR", DEFAULT_GOLD))
 
@@ -34,6 +36,8 @@ def load():
          ["gold_reviews", "gold_aspect_mentions", "gold_entities", "gold_relations", "gold_interests",
           "gold_review_interests"]}
     t["graph"] = json.loads((GOLD / "graph.json").read_text(encoding="utf-8"))
+    lin = GOLD / "gold_entity_lineage.parquet"  # absent in golden layers built before lineage existed
+    t["lineage"] = pd.read_parquet(lin) if lin.exists() else None
     return t
 
 
@@ -44,7 +48,8 @@ if not (GOLD / "graph.json").exists():
 data = load()
 reviews, mentions, entities = data["gold_reviews"], data["gold_aspect_mentions"], data["gold_entities"]
 relations, interests, bridge = data["gold_relations"], data["gold_interests"], data["gold_review_interests"]
-hub_names = {"trustpilot", "reviewer", "business"}
+lineage = data["lineage"]
+hub_names = HUB_ENTITIES
 
 macro_int = interests[interests["level"] == "macro"].sort_values("n_reviews", ascending=False)
 micro_int = interests[interests["level"] == "micro"]
@@ -71,9 +76,10 @@ def cluster_titles(level: str) -> dict[str, str]:
 
 
 @st.cache_data
-def graph_layout(nodes: tuple, edges: tuple, clusters: tuple) -> dict[str, tuple[float, float]]:
-    """Two-level layout so each Leiden cluster reads as a region: a spring layout inside every cluster, and the
-    clusters themselves placed by a spring layout of the cluster-level graph (related clusters end up close)."""
+def graph_layout(nodes: tuple, edges: tuple, clusters: tuple, spacing: float = 1.0) -> dict[str, tuple[float, float]]:
+    """Two-level layout so each Leiden cluster reads as a region: every cluster is a disc of radius
+    ~ sqrt(size) x spacing, discs are placed by a spring layout of the cluster-level graph so related clusters sit
+    close, then pushed apart until no two overlap."""
     H = nx.Graph()
     H.add_nodes_from(nodes)
     H.add_weighted_edges_from(edges)
@@ -89,17 +95,49 @@ def graph_layout(nodes: tuple, edges: tuple, clusters: tuple) -> dict[str, tuple
         if ga != gb:
             meta.add_edge(ga, gb, weight=meta.get_edge_data(ga, gb, {"weight": 0})["weight"] + w)
     centers = nx.spring_layout(meta, seed=7, weight="weight", k=2.2 / math.sqrt(max(len(groups), 1)), iterations=300)
-    spread = 260 * math.sqrt(len(groups))
 
+    step = 60 * spacing  # distance scale between neighbouring nodes
+    R = {g: step * math.sqrt(len(ms)) + 40 for g, ms in groups.items()}  # disc radius per cluster
+    scale = 1.5 * math.sqrt(sum(r * r for r in R.values()))
+    C = {g: [float(x) * scale, float(y) * scale] for g, (x, y) in centers.items()}
+    gap = 80 * spacing
+    # ponytail: O(clusters^2) pairwise push-apart, fine for the <~100 clusters a screen can show
+    for _ in range(300):
+        moved = False
+        for a, b in combinations(C, 2):
+            dx, dy = C[b][0] - C[a][0], C[b][1] - C[a][1]
+            d = math.hypot(dx, dy)
+            need = R[a] + R[b] + gap
+            if d < need:
+                ux, uy = (dx / d, dy / d) if d > 1e-6 else (1.0, 0.0)
+                push = (need - d) / 2
+                C[a][0] -= ux * push; C[a][1] -= uy * push
+                C[b][0] += ux * push; C[b][1] += uy * push
+                moved = True
+        if not moved:
+            break
+
+    # Inside a cluster: sunflower spiral (r ~ sqrt(i), golden angle) gives every node equal room, with the
+    # most-connected entity at the centre. A spring layout here clumps star-shaped clusters around their hub.
+    golden = math.pi * (3 - math.sqrt(5))
     pos = {}
     for g, ms in groups.items():
-        radius = 70 * math.sqrt(len(ms))
-        local = (nx.spring_layout(H.subgraph(ms), seed=7, weight="weight", iterations=200)
-                 if len(ms) > 1 else {ms[0]: (0.0, 0.0)})
-        cx, cy = centers[g]
-        for n, (x, y) in local.items():
-            pos[n] = (float(cx) * spread + float(x) * radius, float(cy) * spread + float(y) * radius)
+        for i, n in enumerate(sorted(ms, key=lambda n: (-H.degree(n, weight="weight"), n))):
+            r = step * math.sqrt(i)
+            pos[n] = (C[g][0] + r * math.cos(i * golden), C[g][1] + r * math.sin(i * golden))
     return pos
+
+
+def strongest_edges(edges: list[dict], k: int = 2) -> list[dict]:
+    """Keep an edge if it is among the k heaviest for at least one of its endpoints."""
+    count: dict[str, int] = {}
+    out = []
+    for e in sorted(edges, key=lambda e: -e["weight"]):
+        if count.get(e["source"], 0) < k or count.get(e["target"], 0) < k:
+            out.append(e)
+            count[e["source"]] = count.get(e["source"], 0) + 1
+            count[e["target"]] = count.get(e["target"], 0) + 1
+    return out
 
 
 # ---------------------------------------------------------------- sidebar
@@ -114,9 +152,14 @@ with st.sidebar:
     level = st.radio("Color nodes by Leiden level", ["macro", "micro"], horizontal=True,
                      format_func=lambda s: f"{s} interests")
     focus = st.selectbox("Highlight interest", ["(all)"] + list(macro_int["title"]))
-    min_mentions = st.slider("Min. mentions per entity", 1, max(2, int(entities["mention_count"].max())), 1)
+    min_mentions = st.slider("Min. mentions per entity", 1, max(2, int(entities["mention_count"].max())),
+                             3 if len(entities) > 300 else 1)  # large graphs: hide one-off entities by default
     show_hubs = st.checkbox("Show hub nodes (Trustpilot, reviewer, business)", value=False)
     show_unclustered = st.checkbox("Show unclustered entities", value=False)
+    edge_mode = st.radio("Edges", ["relations + 2 strongest co-mentions per node", "extracted relations only",
+                                   "all edges"],
+                         help="Co-mention = two entities mentioned in the same review. They are most of the edges.")
+    spacing = st.slider("Node spacing", 1.0, 3.0, 1.5, 0.25)
 
 rv = reviews[reviews["stars"].isin(stars_sel) & reviews["source_group"].isin(src_sel) & reviews["language"].isin(lang_sel)]
 rids = set(rv["review_id"])
@@ -140,7 +183,8 @@ k[2].metric("Relations", len(relations))
 k[3].metric("Macro interests", len(macro_int))
 k[4].metric("Avg rating", f"{rv['stars'].mean():.2f}★" if len(rv) else "–")
 
-tab_int, tab_graph, tab_rev = st.tabs(["Interests", "Knowledge graph", "Reviews"])
+tab_int, tab_graph, tab_canon, tab_rev, tab_flow = st.tabs(
+    ["Interests", "Knowledge graph", "Canonicalization", "Reviews", "Pipeline"])
 
 # ---------------------------------------------------------------- interests
 with tab_int:
@@ -207,8 +251,14 @@ with tab_graph:
         ents = ents[(ents["cluster"] != "-1") | ents["is_hub"]]
     keep = set(ents["entity_id"])
     vis_edges = [e for e in data["graph"]["edges"] if e["source"] in keep and e["target"] in keep]
+    is_rel = lambda e: any(k != "co_mention" for k in e["kinds"])  # noqa: E731
+    if edge_mode.startswith("relations +"):
+        vis_edges = [e for e in vis_edges if is_rel(e)] + strongest_edges([e for e in vis_edges if not is_rel(e)])
+    elif edge_mode.startswith("extracted"):
+        vis_edges = [e for e in vis_edges if is_rel(e)]
+    # Layout uses only the drawn edges, so hidden co-mentions don't pull clusters into a clump.
     pos = graph_layout(tuple(sorted(keep)), tuple((e["source"], e["target"], e["weight"]) for e in vis_edges),
-                       tuple(zip(ents["entity_id"], ents["cluster"])))
+                       tuple(zip(ents["entity_id"], ents["cluster"])), spacing)
 
     net = Network(height="680px", width="100%", bgcolor=SURFACE, font_color=INK, cdn_resources="remote")
     for e in ents.itertuples(index=False):
@@ -227,12 +277,9 @@ with tab_graph:
                      color={"background": color, "border": SURFACE, "highlight": {"background": color, "border": INK}},
                      opacity=0.25 if faded else 1.0, borderWidth=2,
                      font={"size": 18, "color": "#89878199" if faded else INK})
-    rel_pairs = {tuple(sorted(p)) for p in zip(relations["source_id"], relations["target_id"])}
     for edge in vis_edges:
-        a, b2 = edge["source"], edge["target"]
-        is_rel = tuple(sorted((a, b2))) in rel_pairs
-        net.add_edge(a, b2, value=edge["weight"], title=", ".join(edge["kinds"]),
-                     color="#898781" if is_rel else "#d6d4cc")
+        net.add_edge(edge["source"], edge["target"], value=edge["weight"], title=", ".join(edge["kinds"]),
+                     color="#898781" if is_rel(edge) else "#d6d4cc")
     # Positions come from Python (deterministic, no drift); physics off, so the initial view fits the whole graph.
     net.set_options(json.dumps({
         "physics": {"enabled": False},
@@ -248,7 +295,7 @@ with tab_graph:
         if ents.empty:
             st.info("No entities match the filters.")
         else:
-            components.html(graph_html, height=700)
+            st.iframe(graph_html, height=700)
     with right:
         st.markdown(f"**Leiden {level} clusters**")
         shown = ents[ents["cluster"] != "-1"].groupby("cluster").size().sort_values(ascending=False)
@@ -286,3 +333,86 @@ with tab_rev:
         st.write(view.loc[view["review_id"] == pick, "text_for_llm"].iloc[0])
         st.dataframe(mentions[mentions["review_id"] == pick].merge(entities[["entity_id", "name"]], on="entity_id")
                      [["name", "category", "opinion", "sentiment", "evidence"]], width="stretch", hide_index=True)
+
+# ---------------------------------------------------------------- canonicalization
+STEP_SHORT = {"brand variants -> Trustpilot": "brand", "unicode NFKC + casefold": "case",
+              "strip punctuation, articles, hyphens": "punctuation", "singularize head noun": "plural"}
+
+
+def changed_steps(raw: str) -> str:
+    """Which normalisation steps actually changed this surface form (edge label in the lineage chart)."""
+    t = normalize_trace(raw)
+    return ", ".join(STEP_SHORT[t[i][0]] for i in range(1, len(t)) if t[i][1] != t[i - 1][1]) or "unchanged"
+
+
+with tab_canon:
+    if lineage is None:
+        st.info("This golden layer has no lineage table. Re-run `uv run poc-trustpilot run` "
+                "(extractions are cached, so it costs ~nothing) to build it.")
+    else:
+        st.markdown("How every name the LLM produced became a graph node: **raw form → normalization steps → "
+                    "normalized name → canonical entity**, either exactly or by fuzzy merge.")
+        k = st.columns(4)
+        k[0].metric("Raw surface forms", lineage["raw"].nunique())
+        k[1].metric("After normalization", lineage["normalized"].nunique())
+        k[2].metric("Canonical entities", lineage["canonical"].nunique())
+        k[3].metric("Fuzzy merges", int((lineage["merge"] == "fuzzy").sum()))
+
+        names = dict(zip(entities["entity_id"], entities["name"]))
+        mentions_of = dict(zip(entities["entity_id"], entities["mention_count"]))
+        n_forms = lineage.groupby("entity_id")["raw"].nunique()
+        only_merged = st.checkbox("Only entities built from several surface forms", value=True)
+        order = entities.sort_values("mention_count", ascending=False)["entity_id"]
+        options = [e for e in order if not only_merged or n_forms.get(e, 0) > 1] or list(order)
+        pick = st.selectbox("Entity", options, format_func=lambda e: f"{names[e]}  ·  {n_forms.get(e, 0)} surface "
+                                                                     f"forms, {mentions_of[e]} mentions")
+        rows = lineage[lineage["entity_id"] == pick].sort_values("n_mentions", ascending=False)
+        shown = rows.head(25)
+        st.graphviz_chart(lineage_dot(shown, names[pick], {r: changed_steps(r) for r in shown["raw"]}),
+                          width="stretch")
+        st.caption("Left: what the LLM wrote (× occurrences). Edge labels: normalization steps that changed it. "
+                   "Middle: normalized name. Dashed orange: fuzzy merge with its similarity score."
+                   + (f" Showing the 25 most frequent of {len(rows)} forms." if len(rows) > 25 else ""))
+        st.dataframe(rows[["raw", "normalized", "canonical", "merge", "fuzzy_score", "n_mentions", "n_reviews",
+                           "roles", "example_review_id"]], hide_index=True, width="stretch")
+
+        raw_pick = st.selectbox("Step-by-step trace for one surface form", list(rows["raw"]))
+        st.dataframe(pd.DataFrame(normalize_trace(raw_pick), columns=["step", "result"]),
+                     hide_index=True, width="stretch")
+
+        st.markdown("##### All fuzzy merges, least similar first")
+        st.caption("Normalization is rule-based and predictable; fuzzy merges are where a wrong merge can happen. "
+                   "Low scores deserve a look.")
+        fz = lineage[lineage["merge"] == "fuzzy"].sort_values(["fuzzy_score", "n_mentions"], ascending=[True, False])
+        if fz.empty:
+            st.info("No fuzzy merges in this run: normalization alone resolved every variant.")
+        else:
+            st.dataframe(fz[["normalized", "canonical", "fuzzy_score", "n_mentions", "raw"]],
+                         hide_index=True, width="stretch")
+
+# ---------------------------------------------------------------- pipeline flowcharts
+with tab_flow:
+    st.markdown("How data moves from the raw CSV to this app. Pick a stage below for its detailed flow.")
+    st.graphviz_chart(OVERVIEW, width="stretch")
+    st.graphviz_chart(LEGEND)
+    stage = st.radio("Stage", list(STAGES), horizontal=True, label_visibility="collapsed")
+    n_macro = int((interests["level"] == "macro").sum())
+    live = {  # numbers from the golden layer currently loaded
+        "2. Sampling": f"This golden layer: {len(reviews)} sampled reviews, "
+                       f"star mix {reviews['stars'].value_counts().sort_index().to_dict()}.",
+        "3. Layer 1: LLM extraction": f"This golden layer: {int(reviews['extraction_ok'].sum())}/{len(reviews)} "
+                                      f"reviews extracted, {len(mentions)} aspect mentions.",
+        "4. Canonicalization": (f"This golden layer: {lineage['raw'].nunique()} raw forms → "
+                                f"{lineage['normalized'].nunique()} normalized → {len(entities)} entities."
+                                if lineage is not None else ""),
+        "5. Layer 2: graph + Leiden": f"This golden layer: {len(entities)} entities, {len(data['graph']['edges'])} "
+                                     f"edges, {entities.loc[entities['macro_cluster'] >= 0, 'macro_cluster'].nunique()} "
+                                     f"macro clusters.",
+        "6. Interests & golden layer": f"This golden layer: {n_macro} macro + {len(interests) - n_macro} micro "
+                                       f"interests.",
+    }
+    dot_src, note = STAGES[stage]
+    st.graphviz_chart(dot_src)
+    st.markdown(note)
+    if live.get(stage):
+        st.caption(live[stage])

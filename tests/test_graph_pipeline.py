@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 
 from poc_trustpilot.Pipeline import gold
-from poc_trustpilot.Pipeline.canonicalize import build_canonical_map, canonicalize, normalize_name
+from poc_trustpilot.Pipeline.canonicalize import build_canonical_map, canonicalize, normalize_name, normalize_trace
 from poc_trustpilot.Pipeline.graph import build_graph, detect_communities, hub_entity_ids, pagerank, relation_table
 
 
@@ -18,6 +18,29 @@ def test_canonical_map_merges_variants_but_not_distinct_concepts():
     m = build_canonical_map(["email", "email", "e mail", "positive review", "negative review"])
     assert m["e mail"] == "email"
     assert m["positive review"] != m["negative review"]
+
+
+def test_normalize_trace_ends_in_normalize_name():
+    trace = normalize_trace("The Trust Pilot Reviews")
+    assert trace[0] == ("raw LLM output", "The Trust Pilot Reviews")
+    assert trace[-1][1] == normalize_name("The Trust Pilot Reviews") == "trustpilot review"
+
+
+def test_lineage_records_exact_and_fuzzy_merges():
+    ext = pd.DataFrame({"review_id": ["r1", "r2", "r3"], "extraction": [
+        {"aspects": [_aspect("Email", "account_verification"), _aspect("emails", "account_verification")],
+         "triplets": [], "overall_sentiment": "negative", "is_about_trustpilot": True},
+        {"aspects": [_aspect("email", "account_verification")],
+         "triplets": [_triplet("trustpilot", "HAS_ISSUE", "e-mail")], "overall_sentiment": "negative",
+         "is_about_trustpilot": True},
+        None]})
+    _, _, entities, lineage = canonicalize(ext)
+    lin = lineage.set_index("raw")
+    assert set(lin.loc[["Email", "emails", "email"], "canonical"]) == {"email"}
+    assert lin.loc["emails", "merge"] == "exact"  # normalisation alone (plural) got it there
+    assert lin.loc["e-mail", "merge"] == "fuzzy" and 90 <= lin.loc["e-mail", "fuzzy_score"] < 100
+    assert lin.loc["e-mail", "roles"] == ["triplet object"]
+    assert lineage["entity_id"].isin(entities["entity_id"]).all()
 
 
 def _aspect(name, cat, sent="negative"):
@@ -52,7 +75,7 @@ def toy():
 
 def test_graph_clusters_separate_themes_and_exclude_hub(toy):
     ext, _ = toy
-    mentions, triplets, entities = canonicalize(ext)
+    mentions, triplets, entities, lineage = canonicalize(ext)
     assert "customer support" in set(entities["name"])  # case/plural normalised
     G = build_graph(mentions, triplets, entities)
     hubs = hub_entity_ids(entities)
@@ -70,11 +93,11 @@ def test_gold_tables_without_api(toy, monkeypatch, tmp_path):
     monkeypatch.setattr(gold, "summarize_cluster",
                         lambda ents, quotes, n, s, cache: {"title": "T", "summary": "S", "sentiment_label": "negative",
                                                            "key_entities": list(ents["name"][:2])})
-    mentions, triplets, entities = canonicalize(ext)
+    mentions, triplets, entities, lineage = canonicalize(ext)
     G = build_graph(mentions, triplets, entities)
     clusters = detect_communities(G, hub_entity_ids(entities))
     ents = gold.entity_stats(entities, mentions, triplets, reviews, clusters, pagerank(G))
-    tables = gold.build_gold(reviews, ext, mentions, triplets, ents, relation_table(triplets), G)
+    tables = gold.build_gold(reviews, ext, mentions, triplets, ents, relation_table(triplets), G, lineage)
 
     assert len(tables["gold_reviews"]) == 12
     assert set(tables["gold_interests"]["level"]) == {"macro"}  # micro == macro for these tiny clusters

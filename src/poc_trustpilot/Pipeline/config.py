@@ -9,10 +9,12 @@ BRONZE = DATA / "bronze"
 SILVER = DATA / "silver"
 GOLD = DATA / "gold"
 
-# LLM - cheapest viable setup: Sonnet 5.5, low effort, thinking off.
-MODEL = "claude-sonnet-5-5"
-EFFORT = "low"
-MAX_WORKERS = 8
+# LLM provider. "anthropic" reads ANTHROPIC_API_KEY, "deepseek" reads DEEPSEEK_API_KEY (both from .env).
+PROVIDER = "deepseek"
+MODEL = {"anthropic": "claude-sonnet-5-5", "deepseek": "deepseek-flash"}[PROVIDER]
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+EFFORT = "low"  # anthropic only
+MAX_WORKERS = {"anthropic": 8, "deepseek": 16}[PROVIDER]
 PROMPT_VERSION = "v2"  # bump to invalidate cached extractions after a prompt/schema change
 
 # Token caps. Reviews are short (sampled median ~66 tokens, max ~400), so these rarely bind.
@@ -23,11 +25,14 @@ MAX_OUTPUT_TOKENS_EXTRACTION = 1024  # a capped extraction is ~250-400 tokens; t
 MAX_OUTPUT_TOKENS_SUMMARY = 512
 MAX_SUMMARY_ENTITIES, MAX_SUMMARY_QUOTES, MAX_QUOTE_CHARS = 15, 8, 160
 
-# USD per million tokens for MODEL - used only for the cost printout.
-PRICE_INPUT, PRICE_OUTPUT = 2.00, 10.00
-PRICE_CACHE_WRITE, PRICE_CACHE_READ = 2.50, 0.20
+# USD per million tokens (input, output, cache write, cache read) - used only for the cost printout.
+# DeepSeek: off-peak rates; peak (01-04 and 06-10 UTC) costs double.
+PRICE_INPUT, PRICE_OUTPUT, PRICE_CACHE_WRITE, PRICE_CACHE_READ = {
+    "anthropic": (2.00, 10.00, 2.50, 0.20),
+    "deepseek": (0.15, 0.60, 0.15, 0.003),
+}[PROVIDER]
 
-SAMPLE_SIZE = 50
+SAMPLE_SIZE = 1000
 SEED = 42
 
 # Leiden: macro communities on the whole graph, micro communities inside each macro one.

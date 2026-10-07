@@ -26,16 +26,26 @@ def _singular(word: str) -> str:
     return word
 
 
-def normalize_name(name: str) -> str:
-    s = unicodedata.normalize("NFKC", canonicalize_brand(name or "")).casefold()
-    s = s.replace("̇", "")  # Turkish dotted-I casefold artifact (notebook 02, section 6)
+def normalize_trace(name: str) -> list[tuple[str, str]]:
+    """Every normalisation step with its result, so the UI can show how a surface form became a node name."""
+    steps = [("raw LLM output", name or "")]
+    s = canonicalize_brand(name or "")
+    steps.append(("brand variants -> Trustpilot", s))
+    s = unicodedata.normalize("NFKC", s).casefold().replace("̇", "")  # Turkish dotted-I artifact (notebook 02)
+    steps.append(("unicode NFKC + casefold", s))
     s = re.sub(r"[\"'`.,;:!?()\[\]]", " ", s)
     s = re.sub(r"^(the|a|an)\s+", "", re.sub(r"\s+", " ", s).strip())
-    s = re.sub(r"-", " ", s)
+    s = " ".join(s.replace("-", " ").split())
+    steps.append(("strip punctuation, articles, hyphens", s))
     words = s.split()
     if words:
         words[-1] = _singular(words[-1])  # head noun of an English noun phrase is the last word
-    return " ".join(words)
+    steps.append(("singularize head noun", " ".join(words)))
+    return steps
+
+
+def normalize_name(name: str) -> str:
+    return normalize_trace(name)[-1][1]
 
 
 def slug(name: str) -> str:
@@ -62,8 +72,10 @@ def build_canonical_map(names: list[str], categories: dict[str, str] | None = No
     return mapping
 
 
-def canonicalize(extractions: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Flatten extractions into (aspect mentions, triplets, entities) with canonical entity ids."""
+def canonicalize(extractions: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Flatten extractions into (aspect mentions, triplets, entities, lineage) with canonical entity ids.
+
+    lineage has one row per distinct (raw surface form, normalised name): how each LLM output became a node."""
     mentions, triplets = [], []
     for rid, ext in zip(extractions["review_id"], extractions["extraction"]):
         if not ext:
@@ -73,10 +85,12 @@ def canonicalize(extractions: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame,
                              "category": a["category"], "opinion": a["opinion"], "sentiment": a["sentiment"],
                              "evidence": a["evidence"]})
         for t in ext["triplets"]:
-            triplets.append({"review_id": rid, "subject": normalize_name(t["subject"]), "predicate": t["predicate"],
+            triplets.append({"review_id": rid, "subject_raw": t["subject"], "subject": normalize_name(t["subject"]),
+                             "predicate": t["predicate"], "object_raw": t["object"],
                              "object": normalize_name(t["object"]), "sentiment": t["sentiment"]})
     mentions = pd.DataFrame(mentions)
-    triplets = pd.DataFrame(triplets, columns=["review_id", "subject", "predicate", "object", "sentiment"])
+    triplets = pd.DataFrame(triplets, columns=["review_id", "subject_raw", "subject", "predicate", "object_raw",
+                                               "object", "sentiment"])
     mentions = mentions[mentions["name"] != ""]
     triplets = triplets[(triplets["subject"] != "") & (triplets["object"] != "")]
 
@@ -84,6 +98,24 @@ def canonicalize(extractions: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame,
     cat_of = mentions.groupby("name")["category"].agg(lambda s: s.mode().iloc[0]).to_dict()
     all_names = list(mentions["name"]) + list(triplets["subject"]) + list(triplets["object"])
     cmap = build_canonical_map(all_names, cat_of)
+
+    forms = pd.concat([
+        mentions[["review_id", "raw_name", "name"]].assign(role="aspect"),
+        triplets[["review_id", "subject_raw", "subject"]].set_axis(["review_id", "raw_name", "name"], axis=1)
+        .assign(role="triplet subject"),
+        triplets[["review_id", "object_raw", "object"]].set_axis(["review_id", "raw_name", "name"], axis=1)
+        .assign(role="triplet object"),
+    ])
+    forms["raw_name"] = forms["raw_name"].str.strip()
+    lineage = forms.groupby(["raw_name", "name"]).agg(
+        n_mentions=("review_id", "size"), n_reviews=("review_id", "nunique"),
+        roles=("role", lambda s: sorted(set(s))), example_review_id=("review_id", "first"),
+    ).reset_index().rename(columns={"raw_name": "raw", "name": "normalized"})
+    lineage["canonical"] = lineage["normalized"].map(cmap)
+    lineage["merge"] = (lineage["normalized"] == lineage["canonical"]).map({True: "exact", False: "fuzzy"})
+    # Same scorer build_canonical_map used, so this is the score that decided the merge.
+    lineage["fuzzy_score"] = [100.0 if n == c else round(fuzz.token_sort_ratio(n, c), 1)
+                              for n, c in zip(lineage["normalized"], lineage["canonical"])]
 
     mentions["canonical"] = mentions["name"].map(cmap)
     triplets["subject"] = triplets["subject"].map(cmap)
@@ -106,4 +138,5 @@ def canonicalize(extractions: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame,
     mentions["entity_id"] = mentions["canonical"].map(id_of)
     triplets["subject_id"] = triplets["subject"].map(id_of)
     triplets["object_id"] = triplets["object"].map(id_of)
-    return mentions.reset_index(drop=True), triplets.reset_index(drop=True), ent
+    lineage["entity_id"] = lineage["canonical"].map(id_of)
+    return mentions.reset_index(drop=True), triplets.reset_index(drop=True), ent, lineage

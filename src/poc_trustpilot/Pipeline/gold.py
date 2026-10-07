@@ -93,7 +93,7 @@ def review_interest_bridge(ents: pd.DataFrame, mentions: pd.DataFrame, triplets:
 
 
 def build_gold(reviews: pd.DataFrame, extractions: pd.DataFrame, mentions: pd.DataFrame, triplets: pd.DataFrame,
-               ents: pd.DataFrame, relations: pd.DataFrame, G) -> dict[str, pd.DataFrame]:
+               ents: pd.DataFrame, relations: pd.DataFrame, G, lineage: pd.DataFrame) -> dict[str, pd.DataFrame]:
     interests = build_interests(ents, mentions, triplets, reviews)
     bridge = review_interest_bridge(ents, mentions, triplets, interests)
 
@@ -112,6 +112,7 @@ def build_gold(reviews: pd.DataFrame, extractions: pd.DataFrame, mentions: pd.Da
         "gold_reviews": gr,
         "gold_aspect_mentions": mentions[["review_id", "entity_id", "category", "opinion", "sentiment", "evidence"]],
         "gold_entities": ents,
+        "gold_entity_lineage": lineage,
         "gold_relations": relations.assign(sentiment_mix=relations["sentiment_mix"].map(json.dumps)),
         "gold_interests": interests.assign(language_mix=interests["language_mix"].map(json.dumps),
                                            source_mix=interests["source_mix"].map(json.dumps)),

@@ -33,8 +33,9 @@ def run(sample_size: int = SAMPLE_SIZE) -> None:
         raise SystemExit("No extractions available - nothing to build.")
 
     print("[4/6] layer 1: canonicalization")
-    mentions, triplets, entities = canonicalize(extractions)
-    print(f"  {len(mentions)} aspect mentions, {len(triplets)} triplets -> {len(entities)} canonical entities")
+    mentions, triplets, entities, lineage = canonicalize(extractions)
+    print(f"  {len(mentions)} aspect mentions, {len(triplets)} triplets | {lineage['raw'].nunique()} raw forms -> "
+          f"{lineage['normalized'].nunique()} normalized -> {len(entities)} canonical entities")
 
     print("[5/6] layer 2: knowledge graph + Leiden")
     G = build_graph(mentions, triplets, entities)
@@ -45,7 +46,7 @@ def run(sample_size: int = SAMPLE_SIZE) -> None:
     print(f"  graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges | {n_macro} macro / {n_micro} micro clusters")
 
     print("[6/6] layer 2 -> gold: interest summaries + golden tables")
-    tables = build_gold(sample, extractions, mentions, triplets, ents, relation_table(triplets), G)
+    tables = build_gold(sample, extractions, mentions, triplets, ents, relation_table(triplets), G, lineage)
     for name, df in tables.items():
         print(f"  {name}: {len(df)} rows")
     print(f"\nLLM usage this run: {METER.report()}")
