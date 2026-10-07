@@ -18,6 +18,7 @@ from poc_trustpilot.Pipeline.canonicalize import normalize_trace
 from poc_trustpilot.Pipeline.config import GOLD as DEFAULT_GOLD
 from poc_trustpilot.Pipeline.config import HUB_ENTITIES
 from poc_trustpilot.ui.flows import LEGEND, OVERVIEW, STAGES, lineage_dot
+from poc_trustpilot.Pipeline.insights import STAKEHOLDERS, interest_trends, stakeholder_view, with_month
 
 GOLD = Path(os.environ.get("POC_GOLD_DIR", DEFAULT_GOLD))
 
@@ -183,8 +184,8 @@ k[2].metric("Relations", len(relations))
 k[3].metric("Macro interests", len(macro_int))
 k[4].metric("Avg rating", f"{rv['stars'].mean():.2f}★" if len(rv) else "–")
 
-tab_int, tab_graph, tab_canon, tab_rev, tab_flow = st.tabs(
-    ["Interests", "Knowledge graph", "Canonicalization", "Reviews", "Pipeline"])
+tab_int, tab_trend, tab_stake, tab_graph, tab_canon, tab_rev, tab_flow = st.tabs(
+    ["Interests", "Trends", "Stakeholders", "Knowledge graph", "Canonicalization", "Reviews", "Pipeline"])
 
 # ---------------------------------------------------------------- interests
 with tab_int:
@@ -416,3 +417,97 @@ with tab_flow:
     st.markdown(note)
     if live.get(stage):
         st.caption(live[stage])
+
+# ---------------------------------------------------------------- trends + stakeholders (computed from gold, no LLM)
+TREND_ICON = {"rising": "▲ rising", "falling": "▼ falling", "stable": "– stable", "too few reviews": "· too few"}
+insight_tables = {"reviews": with_month(rv), "aspect_mentions": mentions, "entities": entities,
+                  "relations": relations, "interests": interests, "review_interests": bridge}
+
+
+def share_chart(df: pd.DataFrame, color_field: str | None, title: str, height: int = 260):
+    """Monthly share-of-reviews line chart (one axis, legend when several series)."""
+    # Horizontal month labels + legend on the right: in Streamlit, a bottom legend and rotated labels eat the
+    # chart's height and squash the plot area to nothing.
+    enc = dict(x=alt.X("month:O", title=None, axis=alt.Axis(labelAngle=0)),
+               y=alt.Y("share:Q", title="share of the month's reviews", axis=alt.Axis(format="%")),
+               tooltip=["month", alt.Tooltip("share:Q", format=".1%")] + ([color_field] if color_field else []))
+    if color_field:
+        names = list(dict.fromkeys(df[color_field]))
+        enc["color"] = alt.Color(f"{color_field}:N", scale=alt.Scale(domain=names, range=PALETTE[:len(names)]),
+                                 legend=alt.Legend(orient="right", title=None, labelLimit=260))
+    chart = alt.Chart(df).mark_line(point=alt.OverlayMarkDef(size=40), strokeWidth=2).encode(**enc)
+    st.markdown(f"##### {title}")
+    st.altair_chart(chart.properties(height=height), width="stretch")
+
+
+with tab_trend:
+    st.markdown("How each interest's **share of the month's reviews** changes over the period. A trend compares the "
+                "first 3 months with the last 3; it needs ≥20 reviews and a change of ≥0.5 points and ≥25%. "
+                "Sidebar filters apply (e.g. Source = organic shows trends among organic reviews only).")
+    series, summ = interest_trends(insight_tables)
+    if summ.empty or series.empty:
+        st.info("Not enough dated reviews for trends with these filters.")
+    else:
+        enough = summ[summ["trend"] != "too few reviews"]
+        k = st.columns(3)
+        k[0].metric("Interests with enough data", f"{len(enough)} / {len(summ)}")
+        k[1].metric("Rising", int((summ["trend"] == "rising").sum()))
+        k[2].metric("Falling", int((summ["trend"] == "falling").sum()))
+        default = list(enough["title"].head(5)) or list(summ["title"].head(5))
+        picked = st.multiselect("Interests to plot (max 8)", list(summ["title"]), default=default, max_selections=8)
+        if picked:
+            ids = summ.set_index("title").loc[picked, "interest_id"]
+            long = (series.loc[ids].assign(title=picked).melt(id_vars="title", var_name="month", value_name="share"))
+            share_chart(long, "title", "Interest share over time", height=340)
+        view = summ.assign(trend=summ["trend"].map(TREND_ICON),
+                           early=summ["early_share"].map("{:.1%}".format), late=summ["late_share"].map("{:.1%}".format),
+                           change=summ["change_pp"].map("{:+.1f} pts".format),
+                           negative=summ["pct_negative"].map("{:.0%}".format))
+        st.dataframe(view[["title", "n_reviews", "early", "late", "change", "trend", "negative", "sentiment_label"]],
+                     hide_index=True, width="stretch",
+                     column_config={"early": "first 3 months", "late": "last 3 months", "negative": "1-2★ reviews"})
+
+with tab_stake:
+    st.markdown("One view per stakeholder group: the question they care about, answered from the golden layer.")
+    who = st.radio("Stakeholder", [s.name for s in STAKEHOLDERS], horizontal=True, label_visibility="collapsed")
+    s = next(x for x in STAKEHOLDERS if x.name == who)
+    v = stakeholder_view(insight_tables, s)
+    st.markdown(f"#### {s.name}\n*{s.question}*")
+    k = st.columns(4)
+    k[0].metric("Reviews", f"{v['n_reviews']:,}", help="Reviews with at least one matching aspect")
+    k[1].metric("Share of reviews", f"{v['share_of_reviews']:.1%}")
+    k[2].metric("Trend", TREND_ICON[v["trend"]], f"{v['change_pp']:+.1f} pts", delta_color="off")
+    k[3].metric("Avg rating of these reviews", f"{v['avg_stars']:.2f}★" if v["n_reviews"] else "–")
+    left, right = st.columns([3, 2])
+    with left:
+        share_chart(v["monthly_share"].rename("share").reset_index().rename(columns={"index": "month"}), None,
+                    "Share of reviews over time", height=220)
+        if "stars_by_channel" in v:
+            sb = v["stars_by_channel"].reset_index().melt(id_vars="month", var_name="channel", value_name="avg_stars")
+            st.markdown("##### Average rating by channel")
+            st.altair_chart(alt.Chart(sb.dropna()).mark_line(point=True, strokeWidth=2).encode(
+                x=alt.X("month:O", title=None), y=alt.Y("avg_stars:Q", title="avg ★", scale=alt.Scale(domain=[1, 5])),
+                color=alt.Color("channel:N", scale=alt.Scale(range=PALETTE), legend=alt.Legend(orient="bottom", title=None)),
+                tooltip=["month", "channel", alt.Tooltip("avg_stars:Q", format=".2f")]).properties(height=220),
+                width="stretch")
+    with right:
+        st.markdown("##### What they mention most")
+        st.dataframe(v["top_entities"].assign(avg_stars=v["top_entities"]["avg_stars"].round(2)),
+                     hide_index=True, width="stretch")
+        for q in v["quotes"]:
+            st.markdown(f"> {q}")
+    if v.get("requests"):
+        st.markdown("##### Feature requests (REQUESTS relations)")
+        st.markdown("\n".join(f"- {n} ({w}×)" for n, w in v["requests"]))
+    if v.get("causes"):
+        st.markdown("##### Root causes reviewers state (CAUSED_BY / LEADS_TO)")
+        st.markdown("\n".join(f"- {c}" for c in v["causes"]))
+    if "negative_drivers" in v:
+        st.markdown("##### Interests driving negative reviews")
+        d = v["negative_drivers"]
+        st.dataframe(d.assign(trend=d["trend"].map(TREND_ICON), negative=d["pct_negative"].map("{:.0%}".format))
+                     [["title", "negative_reviews", "n_reviews", "negative", "trend"]], hide_index=True, width="stretch")
+        st.markdown("##### Channel gap")
+        st.dataframe(v["channel_stats"].assign(avg_stars=v["channel_stats"]["avg_stars"].round(2),
+                                               pct_one_star=v["channel_stats"]["pct_one_star"].map("{:.0%}".format)),
+                     width="stretch")

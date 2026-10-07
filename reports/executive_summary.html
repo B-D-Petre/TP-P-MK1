@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trustpilot Review Insights</title>
+<style>
+:root { --bg:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781; --rule:#e1e0d9;
+  --series:#2a78d6; --accent:#2a78d6; --up:#b03030; --down:#006300; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#0d0d0d; --surface:#1a1a19;
+  --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781; --rule:#2c2c2a; --series:#3987e5; --accent:#3987e5;
+  --up:#e66767; --down:#0ca30c; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+main { max-width:1100px; margin:0 auto; padding:32px 16px 48px; }
+header h1 { font-size:28px; margin:0 0 4px; letter-spacing:-.01em; }
+header p { color:var(--ink2); margin:0; }
+.kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:24px 0; }
+.kpi { background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:12px 14px; }
+.kpi .v { font-size:24px; font-weight:650; } .kpi .l { color:var(--ink2); font-size:13px; }
+h2 { font-size:18px; margin:28px 0 10px; }
+.findings { background:var(--surface); border:1px solid var(--rule); border-left:4px solid var(--accent);
+  border-radius:10px; padding:14px 18px 14px 34px; margin:0; }
+.findings li { margin:6px 0; }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(310px,1fr)); gap:14px; }
+.card { background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:14px 16px; }
+.card h3 { margin:0; font-size:16px; } .q { color:var(--ink2); margin:2px 0 10px; font-size:13.5px; }
+.row { display:flex; justify-content:space-between; align-items:flex-end; gap:8px; }
+.big { font-size:28px; font-weight:650; line-height:1; } .lbl { color:var(--ink2); font-size:12.5px; margin-top:4px; }
+.trend { text-align:right; } .spark { display:block; margin-top:4px; }
+.badge { font-size:12px; font-weight:600; padding:2px 8px; border-radius:999px; border:1px solid var(--rule); }
+.badge.bad { color:var(--up); } .badge.good { color:var(--down); } .badge.flat { color:var(--ink2); }
+.ents,.extra { font-size:13.5px; margin:10px 0 0; }
+blockquote { margin:10px 0 0; padding:6px 10px; border-left:3px solid var(--rule); color:var(--ink2);
+  font-style:italic; font-size:13.5px; }
+footer { margin-top:28px; color:var(--muted); font-size:12.5px; }
+@media print { body { background:#fff; } main { padding:0; } .card,.kpi,.findings { break-inside:avoid; } }
+</style></head>
+<body><main>
+<header><h1>What 9,983 reviews say about Trustpilot</h1>
+<p>Reviews of Trustpilot on Trustpilot, 2021-07 to 2022-01 · topic-and-trend POC · generated 07 Oct 2026</p></header>
+<section class="kpis">
+  <div class="kpi"><div class="v">9,983</div><div class="l">reviews analysed</div></div>
+  <div class="kpi"><div class="v">4.12★</div><div class="l">average rating</div></div>
+  <div class="kpi"><div class="v">19%</div><div class="l">rated 1–2★</div></div>
+  <div class="kpi"><div class="v">2.6★ vs 4.4★</div><div class="l">organic vs invited</div></div>
+  <div class="kpi"><div class="v">69</div><div class="l">interests found</div></div>
+</section>
+<h2>Three things to know</h2>
+<ol class="findings"><li><b>The channel decides the score.</b> Organic reviews average <b>2.6★</b> against <b>4.4★</b> for invited ones. Organic is 16% of reviews but 50% of all 1★ reviews.</li><li><b>Biggest driver of negative reviews: “Cluster 1”</b> — 1,335 reviews, 53% of them 1–2★, trend: – stable.</li><li><b>Biggest change: “Cluster 3”</b> went from 3.6% to 5.3% of monthly reviews (+1.7 pts).</li></ol>
+<h2>What it means for each team</h2>
+<section class="grid">
+<article class="card">
+  <h3>Leadership</h3>
+  <p class="q">Where is sentiment heading, and what drives the negative reviews?</p>
+  <div class="row"><div><div class="big">18%</div><div class="lbl">of reviews · 1,804</div></div>
+    <div class="trend"><span class="badge bad">▲ rising</span><svg class="spark" viewBox="0 0 150 38" width="150" height="38" role="img" aria-label="monthly share, 2021-07 to 2022-01"><polyline points="4.0,12.7 27.7,13.0 51.3,8.7 75.0,9.1 98.7,5.6 122.3,7.2 146.0,4.0" fill="none" stroke="var(--series)" stroke-width="2" stroke-linejoin="round"/><circle cx="146.0" cy="4.0" r="3" fill="var(--series)"/></svg></div></div>
+  <p class="ents"><b>Mentioned most:</b> review removal, customer support, trust_credibility</p><blockquote>“Horrible no response robotic”</blockquote>
+</article>
+<article class="card">
+  <h3>Trust &amp; Safety</h3>
+  <p class="q">Are complaints about moderation, fake reviews and scams growing?</p>
+  <div class="row"><div><div class="big">10%</div><div class="lbl">of reviews · 961</div></div>
+    <div class="trend"><span class="badge flat">– stable</span><svg class="spark" viewBox="0 0 150 38" width="150" height="38" role="img" aria-label="monthly share, 2021-07 to 2022-01"><polyline points="4.0,12.3 27.7,9.0 51.3,9.5 75.0,6.4 98.7,5.5 122.3,6.5 146.0,4.0" fill="none" stroke="var(--series)" stroke-width="2" stroke-linejoin="round"/><circle cx="146.0" cy="4.0" r="3" fill="var(--series)"/></svg></div></div>
+  <p class="ents"><b>Mentioned most:</b> review removal, fake review, review moderation</p><blockquote>“Full of fake reviews and scammer.”</blockquote>
+</article>
+<article class="card">
+  <h3>Product / UX</h3>
+  <p class="q">Which product frictions do users hit, and what do they ask for?</p>
+  <div class="row"><div><div class="big">5%</div><div class="lbl">of reviews · 484</div></div>
+    <div class="trend"><span class="badge bad">▲ rising</span><svg class="spark" viewBox="0 0 150 38" width="150" height="38" role="img" aria-label="monthly share, 2021-07 to 2022-01"><polyline points="4.0,17.0 27.7,18.9 51.3,11.6 75.0,9.7 98.7,5.5 122.3,8.5 146.0,4.0" fill="none" stroke="var(--series)" stroke-width="2" stroke-linejoin="round"/><circle cx="146.0" cy="4.0" r="3" fill="var(--series)"/></svg></div></div>
+  <p class="ents"><b>Mentioned most:</b> invitation email, email notification, review invitation</p><p class="extra"><b>Top request:</b> photo upload</p><blockquote>“All I need is a new email address”</blockquote>
+</article>
+<article class="card">
+  <h3>Customer Support</h3>
+  <p class="q">How is support experienced, and what causes the complaints?</p>
+  <div class="row"><div><div class="big">10%</div><div class="lbl">of reviews · 996</div></div>
+    <div class="trend"><span class="badge flat">– stable</span><svg class="spark" viewBox="0 0 150 38" width="150" height="38" role="img" aria-label="monthly share, 2021-07 to 2022-01"><polyline points="4.0,6.9 27.7,7.3 51.3,10.0 75.0,12.3 98.7,5.7 122.3,4.0 146.0,6.7" fill="none" stroke="var(--series)" stroke-width="2" stroke-linejoin="round"/><circle cx="146.0" cy="6.7" r="3" fill="var(--series)"/></svg></div></div>
+  <p class="ents"><b>Mentioned most:</b> customer support, service, customer service</p><p class="extra"><b>Stated cause:</b> customer support leads to problem resolution</p><blockquote>“Poor service”</blockquote>
+</article>
+<article class="card">
+  <h3>B2B / Business customers</h3>
+  <p class="q">What do businesses using Trustpilot think of tools and pricing?</p>
+  <div class="row"><div><div class="big">3%</div><div class="lbl">of reviews · 253</div></div>
+    <div class="trend"><span class="badge flat">– stable</span><svg class="spark" viewBox="0 0 150 38" width="150" height="38" role="img" aria-label="monthly share, 2021-07 to 2022-01"><polyline points="4.0,4.0 27.7,6.8 51.3,13.1 75.0,6.0 98.7,11.1 122.3,6.3 146.0,18.5" fill="none" stroke="var(--series)" stroke-width="2" stroke-linejoin="round"/><circle cx="146.0" cy="18.5" r="3" fill="var(--series)"/></svg></div></div>
+  <p class="ents"><b>Mentioned most:</b> business_tools_pricing, review collection, pricing</p><blockquote>“completely out of my small businesses price range”</blockquote>
+</article>
+<article class="card">
+  <h3>Marketing / Brand</h3>
+  <p class="q">What do consumers value about Trustpilot, in their own words?</p>
+  <div class="row"><div><div class="big">38%</div><div class="lbl">of reviews · 3,822</div></div>
+    <div class="trend"><span class="badge flat">– stable</span><svg class="spark" viewBox="0 0 150 38" width="150" height="38" role="img" aria-label="monthly share, 2021-07 to 2022-01"><polyline points="4.0,4.0 27.7,4.0 51.3,7.0 75.0,5.3 98.7,5.0 122.3,7.7 146.0,9.8" fill="none" stroke="var(--series)" stroke-width="2" stroke-linejoin="round"/><circle cx="146.0" cy="9.8" r="3" fill="var(--series)"/></svg></div></div>
+  <p class="ents"><b>Mentioned most:</b> research_before_buying, ease_of_use, review platform</p><blockquote>“Easy platform to use”</blockquote>
+</article></section>
+<footer><p><b>Method.</b> An LLM extracts aspects, opinions and relations from each review (any language → English
+concepts); these are merged into canonical entities, connected in a knowledge graph and grouped into interests with
+Leiden community detection. Shares are % of each month's reviews; trends compare the first and last three months.
+Explore everything in the Streamlit app (<code>uv run streamlit run src/poc_trustpilot/ui/app.py</code>).</p>
+<p><b>Caveats.</b> 9,983 reviews over 2021-07 to 2022-01; LLM extraction can mislabel individual reviews;
+trends on small interests are noisy (shown as “too few reviews”).</p></footer>
+</main></body></html>
